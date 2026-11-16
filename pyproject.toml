@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "retail-memory-assistant"
+version = "0.1.0"
+description = "Retail shopping assistant with Cognee memory"
+requires-python = ">=3.12"
+dependencies = [
+    "streamlit",
+    "mcp",
+    "cognee",
+    "httpx",
+    "python-dotenv",
+]
+
+[tool.uv]
+add-python = "3.12"
+exclude-newer = "2026-11-01"

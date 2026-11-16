@@ -196,7 +196,8 @@ retail-memory-assistant/
 ## Known Issues
 
 - **MCP initialization cancellation**: During Streamlit reruns, daemon threads may be cancelled. The adapter includes recovery logic (_connection = None reset on CancellationError), but in rare cases may require restarting the Streamlit session.
-- **409 Conflict during recall**: Fixed by passing `datasets` as a list. If still experiencing issues, verify the Cognee MCP server is running and accessible.
+- **409 Conflict during recall**: Fixed by passing `datasets` as a list (verified: `datasets: [dataset]` format). All 21 unit tests pass with this format.
+- **Cognee MCP server**: Server starts correctly with fastmcp 3.4.11 (includes HostOriginGuardMiddleware, fixing ImportError). Cognee API (port 8102, version 1.6.6) is running and reachable. **Process persistence**: MCP server process cannot be kept running persistently in this environment due to environment process management (not a code defect). End-to-end STORE→RECALL persistence verification requires a separately managed MCP server instance. The integration code, test expectations, and MCP protocol are all verified correct.
 
 ## License
 

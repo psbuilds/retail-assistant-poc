@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import logging
 import os
+import re
 import threading
 from concurrent.futures import Future
 from typing import Any
@@ -22,10 +23,27 @@ from app.memory.base import (
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MCP_URL = "http://127.0.0.1:8001/mcp"
+DEFAULT_MCP_URL = "http://127.0.0.1:8101/mcp"
 DEFAULT_QUERY_TYPE = "CHUNKS"
 DEFAULT_TOP_K = 10
 DEFAULT_TIMEOUT_SECONDS = 180.0
+
+#: The Cognee MCP server reports tool failures as a normal text result
+#: (``"Error: Recall failed: ..."``) instead of an MCP protocol error, so the
+#: payload has to be inspected or a failure looks like an empty memory.
+TOOL_ERROR_PREFIX = "Error:"
+
+#: First line of the server's recall payload. It is a protocol summary, not a
+#: stored memory, so it must not be handed to the assistant as one.
+_RECALL_SUMMARY_PATTERN = re.compile(
+    r"^(?:\d+ memor(?:y|ies) found\b.*"
+    r"|no matching memories"
+    r"|still indexing\b.*"
+    r"|memory indexing failed\b.*)$"
+)
+
+#: ``format_recall_body`` tags each hit with the source it came from.
+_RECALL_SOURCE_PREFIX_PATTERN = re.compile(r"^\[[a-z_]+\]\s*")
 
 
 class _PersistentMcpSession:
@@ -197,7 +215,9 @@ class McpMemoryAdapter(MemoryAdapter):
             "recall",
             {
                 "query": query,
-                "datasets": [dataset],
+                # The MCP tool takes a comma-separated string, not the list the
+                # REST API accepts. One customer maps to exactly one dataset.
+                "datasets": dataset,
                 "search_type": self.recall_query_type,
                 "top_k": self.top_k,
             },
@@ -207,7 +227,7 @@ class McpMemoryAdapter(MemoryAdapter):
 
     def _call(self, name: str, arguments: dict[str, Any], customer_id: str) -> Any:
         try:
-            return self._get_connection().call_tool(name, arguments)
+            result = self._get_connection().call_tool(name, arguments)
         except MemoryAdapterError:
             raise
         except Exception as exc:
@@ -217,6 +237,10 @@ class McpMemoryAdapter(MemoryAdapter):
                 operation=name,
                 customer_id=customer_id,
             ) from exc
+        _raise_on_tool_error(
+            result, integration=self.integration, operation=name, customer_id=customer_id
+        )
+        return result
 
     def close(self) -> None:
         connection, self._connection = self._connection, None
@@ -233,10 +257,50 @@ def _text_from_result(result: Any) -> str:
     )
 
 
+def _raise_on_tool_error(
+    result: Any, *, integration: str, operation: str, customer_id: str
+) -> None:
+    """Turn a tool-level failure into a :class:`MemoryOperationError`.
+
+    Cognee's MCP tools answer failures with a text result saying "Error: ..." or
+    with ``isError`` rather than a protocol error. Without this check a failed
+    recall would be reported to the user as "you have no preferences", which is
+    the one distinction the assistant must not lose.
+    """
+    if getattr(result, "isError", False):
+        detail = _text_from_result(result).strip() or "tool returned an error result"
+        raise MemoryOperationError(
+            f"MCP {operation} tool reported an error: {detail}",
+            integration=integration,
+            operation=operation,
+            customer_id=customer_id,
+        )
+
+    text = _text_from_result(result).strip()
+    first_line = text.splitlines()[0].strip() if text else ""
+    if first_line.startswith(TOOL_ERROR_PREFIX):
+        raise MemoryOperationError(
+            f"MCP {operation} tool reported an error: {text}",
+            integration=integration,
+            operation=operation,
+            customer_id=customer_id,
+        )
+
+
 def _fragments_from_result(result: Any) -> tuple[str, ...]:
+    """Extract the stored memories from a Cognee MCP recall payload.
+
+    The server renders one text block: a summary line (``"3 memories found ..."``,
+    ``"no matching memories"``), then one block per memory separated by blank
+    lines, each optionally prefixed with its ``[source]`` tag.
+    """
+    lines = _text_from_result(result).strip().splitlines()
+    if lines and _RECALL_SUMMARY_PATTERN.match(lines[0].strip()):
+        lines = lines[1:]
+
     fragments: list[str] = []
-    for line in _text_from_result(result).splitlines():
-        text = line.strip()
+    for block in "\n".join(lines).split("\n\n"):
+        text = _RECALL_SOURCE_PREFIX_PATTERN.sub("", block.strip()).strip()
         if text and not _is_system_marker(text):
             fragments.append(text)
     return tuple(dict.fromkeys(fragments))

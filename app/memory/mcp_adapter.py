@@ -242,6 +242,44 @@ class McpMemoryAdapter(MemoryAdapter):
         )
         return result
 
+    def forget(self, customer_id: str, dataset: str) -> int:
+        """Delete all memories for a customer dataset using the MCP forget tool.
+
+        Args:
+            customer_id: The customer ID whose memories to delete
+            dataset: The dataset name to delete memories from
+
+        Returns:
+            Result count from the forget operation
+        """
+        try:
+            result = self._call(
+                "forget",
+                {
+                    "customer_id": customer_id,
+                    "dataset_name": dataset,
+                },
+                customer_id,
+            )
+            # _call returns the raw result; extract count from text if possible
+            text = _text_from_result(result).strip()
+            # Try to extract a number from the result text
+            import re
+            match = re.search(r"(\d+)", text)
+            if match:
+                return int(match.group(1))
+            # If no number, return 1 if we got a success signal
+            if "success" in text.lower() or "deleted" in text.lower():
+                return 1
+            return 0
+        except Exception as exc:
+            raise MemoryAdapterError(
+                f"MCP forget failed: {exc}",
+                integration=self.integration,
+                operation="forget",
+                customer_id=customer_id,
+            ) from exc
+
     def close(self) -> None:
         connection, self._connection = self._connection, None
         self._closed = True

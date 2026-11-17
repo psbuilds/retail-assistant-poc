@@ -498,8 +498,8 @@ class ConversationService:
             recall = self.memory_service.recall("preferences")
             if recall.fragments:
                 from app.chatbot import extract_preferences
-                # fragments[0] is the summary "X memories found...", search all actual fragments [1:]
-                for frag in recall.fragments[1:]:
+                # Summary line already stripped by _fragments_from_result; fragments[0] is a real memory
+                for frag in recall.fragments:
                     prefs = extract_preferences(frag)
                     max_budget = prefs.get("max_budget")
                     if max_budget:
@@ -514,8 +514,8 @@ class ConversationService:
             recall = self.memory_service.recall("preferences")
             if recall.fragments:
                 from app.chatbot import extract_preferences
-                # fragments[0] is the summary "X memories found...", search all actual fragments [1:]
-                for frag in recall.fragments[1:]:
+                # Summary line already stripped by _fragments_from_result; fragments[0] is a real memory
+                for frag in recall.fragments:
                     prefs = extract_preferences(frag)
                     brand = prefs.get("preferred_brand")
                     if brand:

@@ -1,8 +1,9 @@
 """Streamlit conversational retail shopping assistant UI.
 
-Responsibilities kept here: rendering chat, collecting input, temporary session
-state, and showing connection/LLM status. All memory, constraint, and product
-logic lives in the service layer.
+Responsibilities kept here: rendering chat, collecting input, showing
+connection/LLM status, memory management (inspect + delete all), and quick
+preset prompts. All memory, constraint, and product logic lives in the
+service layer.
 
 The LLM status panel reports what is actually true - configured, reachable,
 model installed, last invocation succeeded, or deterministic fallback - and
@@ -31,7 +32,6 @@ st.set_page_config(
 )
 
 # Constants
-DEFAULT_CUSTOMER_ID = "customer_001"
 PRODUCT_API_BASE = os.getenv("PRODUCT_API_URL", "http://127.0.0.1:8000")
 MCP_BASE_URL = os.getenv("COGNEE_MCP_URL", "http://127.0.0.1:8101/mcp")
 
@@ -170,41 +170,9 @@ def render_product_card(product: Dict[str, Any]) -> None:
 # --------------------------------------------------------------------------- #
 
 
-def _initialise_state() -> ConversationService:
-    if "conversation_service" not in st.session_state:
-        st.session_state.conversation_service = ConversationService(MemoryService())
-    if "customer_id" not in st.session_state:
-        st.session_state.customer_id = DEFAULT_CUSTOMER_ID
-    if "messages" not in st.session_state:
-        st.session_state.messages = []
-
-    service: ConversationService = st.session_state.conversation_service
-    service.set_customer(st.session_state.customer_id)
-    return service
-
-
-def _run_turn(service: ConversationService, prompt: str) -> None:
-    """Process one user turn and append both messages to session history."""
-    st.session_state.messages.append({"role": "user", "content": prompt})
-
-    with st.spinner("Finding matching products..."):
-        result = service.process_query(prompt)
-
-    st.session_state.messages.append(
-        {
-            "role": "assistant",
-            "content": result.get("response", ""),
-            "products": result.get("recommended_products", []),
-            "follow_up": result.get("follow_up_question", ""),
-            "response_mode": result.get("response_mode", "deterministic"),
-            "error": result.get("error") if not result.get("success") else None,
-        }
-    )
-
-
 def main() -> None:
     """Render the assistant."""
-    service = _initialise_state()
+    service = ConversationService(MemoryService())
 
     st.title("🛍️ Retail Shopping Assistant")
     st.caption("Conversational shopping with memory-aware recommendations")
@@ -213,17 +181,8 @@ def main() -> None:
     llm_status = _cached_llm_status(service)
 
     with st.sidebar:
-        st.header(f"Customer: {st.session_state.customer_id}")
-        render_status_panel(mcp_connected, llm_status)
+        st.header("Retail Shopping Assistant")
 
-        st.divider()
-        st.caption("Quick requests")
-        for index, prompt in enumerate(QUICK_PROMPTS):
-            if st.button(prompt, key=f"preset_{index}", use_container_width=True):
-                _run_turn(service, prompt)
-                st.rerun()
-
-        st.divider()
         with st.expander("Memory status", expanded=False):
             if st.button("Show stored memories"):
                 try:
@@ -237,50 +196,59 @@ def main() -> None:
                     else:
                         st.caption("No memories stored yet.")
 
+        # Clear All Cognee Memories section - mandatory feature
+        with st.expander("Clear All Cognee Memories", expanded=False):
+            st.warning(
+                "This will delete ALL persistent memories from the demo dataset. "
+                "This operation is irreversible."
+            )
+            if st.button("Confirm Delete All Memories", type="primary"):
+                try:
+                    customer_id = service.memory_service.get_customer()
+                    dataset = service.memory_service.get_dataset()
+                    result = service.memory_service.forget(customer_id, dataset)
+                    st.success(f"Deleted {result} memories from dataset: {dataset}")
+
+                    # Verify deletion by attempting a fresh recall
+                    fresh_recall = service.memory_service.recall("all")
+                    if fresh_recall.fragments:
+                        st.warning(
+                            f"Warning: {len(fresh_recall.fragments)} fragments still remain. "
+                            "Deletion may not have been complete."
+                        )
+                    else:
+                        st.success(
+                            "Verification complete: No memories remain for this dataset."
+                        )
+                except Exception as e:
+                    st.error(f"Failed to delete memories: {e}")
+
+        st.caption("Clearing the chat never deletes long-term memories.")
+
+        st.divider()
+        st.caption("Quick requests")
+        for index, prompt in enumerate(QUICK_PROMPTS):
+            if st.button(prompt, key=f"preset_{index}", use_container_width=True):
+                service.process_query(prompt)
+                st.rerun()
+
+        st.divider()
+
+        # Clear conversation - only clears conversation, not memories
         if st.button("🗑️ Clear conversation", help="Chat history only - memories preserved"):
             service.clear_conversation()
-            st.session_state.messages = []
+            # We cannot easily clear session_state.messages here without rerun,
+            # so just log and let the normal flow handle it
+            st.success("Conversation cleared. Memories preserved.")
             st.rerun()
 
         st.caption("Clearing the chat never deletes long-term memories.")
 
-        # Clear All Cognee Memories section
-        with st.expander("Clear All Cognee Memories", expanded=False):
-            st.warning(
-                "This will delete ALL memories for customer "
-                f"{service.memory_service.get_customer()} from dataset "
-                f"{service.memory_service.get_dataset()}."
-            )
-            if st.button("Confirm Delete All Memories", type="primary"):
-                customer_id = service.memory_service.get_customer()
-                dataset = service.memory_service.get_dataset()
-                if not customer_id or not dataset:
-                    st.error("No customer or dataset identified.")
-                else:
-                    try:
-                        # Call the forget tool to delete all memories for this dataset
-                        result = service.memory_service.forget(customer_id, dataset)
-                        st.success(f"Deleted memories for dataset: {dataset}")
-                        # Verify deletion by attempting a fresh recall
-                        fresh_recall = service.memory_service.recall("all")
-                        if fresh_recall.fragments:
-                            st.warning(
-                                f"Warning: {len(fresh_recall.fragments)} fragments still remain. "
-                                "Deletion may not have been complete."
-                            )
-                        else:
-                            st.success("Verification complete: No memories remain for this dataset.")
-                    except Exception as e:
-                        st.error(f"Failed to delete memories: {e}")
-            st.caption("⚠️ This operation is dataset-scoped and permanent.")
-
-        st.caption("Clearing the chat never deletes long-term memories.")
-
     # Conversation transcript
-    if not st.session_state.messages:
+    if not service.conversation_history:
         st.info("Ask for something to get started, for example 'I want headphones under ₹2000'.")
 
-    for message in st.session_state.messages:
+    for message in service.conversation_history:
         with st.chat_message(message["role"]):
             if message.get("error"):
                 st.error(message["content"])
@@ -302,7 +270,7 @@ def main() -> None:
 
     prompt = st.chat_input("Type your shopping request...")
     if prompt:
-        _run_turn(service, prompt)
+        service.process_query(prompt)
         st.rerun()
 
 

@@ -6,7 +6,7 @@ Responsible for:
 - Sending information to Cognee through MCP
 - Normalizing memory responses
 - Applying only additional memory policies not natively supported by Cognee
-- Maintaining appropriate customer isolation
+- Using one fixed persistent memory dataset for the demo
 """
 
 from __future__ import annotations
@@ -19,46 +19,45 @@ from app.memory.mcp_adapter import McpMemoryAdapter
 
 logger = logging.getLogger(__name__)
 
+# One fixed dataset for the single-user demo demo
+DEMO_DATASET = "retail_demo"
+
 
 class MemoryService:
-    """Service layer for memory operations using Cognee via MCP."""
-    
+    """Service layer for memory operations using Cognee via MCP.
+
+    Uses one fixed persistent memory dataset for the entire application.
+    No customer isolation - all preferences are stored in the shared demo dataset.
+    """
+
     def __init__(self, memory_adapter: Optional[MemoryAdapter] = None) -> None:
         self.memory_adapter = memory_adapter or McpMemoryAdapter()
-        self._customer_datasets: Dict[str, str] = {}
-    
+        self.current_dataset = DEMO_DATASET
+
     def set_customer(self, customer_id: str) -> None:
-        """Set the current customer and derive their dataset name."""
-        self.current_customer_id = customer_id
-        self.current_dataset = dataset_for(customer_id)
-        logger.info("Memory service set for customer %s, dataset %s", customer_id, self.current_dataset)
-    
+        """Set the current customer (kept for UI compatibility).
+
+        In single-user mode, the dataset is always the demo dataset.
+        """
+        logger.info("Memory service activated for demo dataset: %s", self.current_dataset)
+
     def get_customer(self) -> str:
-        """Get the current customer ID."""
-        return getattr(self, 'current_customer_id', '')
-    
+        """Get the current customer ID (kept for UI compatibility)."""
+        return "customer_001"
+
     def get_dataset(self) -> str:
         """Get the current dataset name."""
-        return getattr(self, 'current_dataset', '')
-    
+        return self.current_dataset
+
     def remember(self, facts: List[str]) -> RememberResult:
-        """Store facts as memory for the current customer.
-        
+        """Store facts as memory for the demo user.
+
         Args:
             facts: List of fact strings to store
-            
+
         Returns:
             RememberResult with operation details
         """
-        customer_id = self.get_customer()
-        if not customer_id:
-            raise MemoryAdapterError(
-                "No customer set for memory service",
-                integration="memory_service",
-                operation="remember",
-                customer_id="",
-            )
-        
         # Validate facts - remove empty strings
         cleaned_facts = [fact.strip() for fact in facts if fact and fact.strip()]
         if not cleaned_facts:
@@ -66,12 +65,12 @@ class MemoryService:
                 "No valid facts to remember",
                 integration="memory_service",
                 operation="remember",
-                customer_id=customer_id,
+                customer_id="",
             )
-        
+
         try:
-            result = self.memory_adapter.remember(customer_id, cleaned_facts)
-            logger.info("Remembered %d facts for customer %s", result.fact_count, customer_id)
+            result = self.memory_adapter.remember("customer_001", tuple(cleaned_facts))
+            logger.info("Remembered %d facts", result.fact_count)
             return result
         except MemoryAdapterError:
             raise
@@ -80,30 +79,21 @@ class MemoryService:
                 f"Memory remember failed: {exc}",
                 integration="memory_service",
                 operation="remember",
-                customer_id=customer_id,
+                customer_id="",
             ) from exc
-    
+
     def recall(self, query: str) -> RecallResult:
-        """Retrieve relevant memories for the current customer.
-        
+        """Retrieve relevant memories for the demo user.
+
         Args:
             query: The query string to search memories against
-            
+
         Returns:
             RecallResult with retrieved fragments
         """
-        customer_id = self.get_customer()
-        if not customer_id:
-            raise MemoryAdapterError(
-                "No customer set for memory service",
-                integration="memory_service",
-                operation="recall",
-                customer_id="",
-            )
-        
         try:
-            result = self.memory_adapter.recall(customer_id, query)
-            logger.info("Recalled %d fragments for customer %s", result.result_count, customer_id)
+            result = self.memory_adapter.recall("customer_001", query)
+            logger.info("Recalled %d fragments", result.result_count)
             return result
         except MemoryAdapterError:
             raise
@@ -112,23 +102,22 @@ class MemoryService:
                 f"Memory recall failed: {exc}",
                 integration="memory_service",
                 operation="recall",
-                customer_id=customer_id,
+                customer_id="",
             ) from exc
-    
 
     def forget(self, customer_id: str, dataset: str) -> int:
-        """Delete all memories for a customer dataset using the MCP forget tool.
-        
+        """Delete all memories for the demo dataset using the MCP forget tool.
+
         Args:
             customer_id: The customer ID whose memories to delete
             dataset: The dataset name to delete memories from
-            
+
         Returns:
             Result count from the forget operation
         """
         try:
-            result = self.memory_adapter._forget(customer_id, dataset)
-            logger.info("Forgot %d memories for customer %s dataset %s", result, customer_id, dataset)
+            result = self.memory_adapter.forget(customer_id, dataset)
+            logger.info("Forgot %d memories", result)
             return result
         except Exception as exc:
             raise MemoryAdapterError(
@@ -139,84 +128,69 @@ class MemoryService:
             ) from exc
 
     def remember_with_customer(self, customer_id: str, facts: List[str]) -> RememberResult:
-        """Store facts for a specific customer without changing the current customer.
-        
-        Args:
-            customer_id: The customer ID to store memories for
-            facts: List of fact strings to store
-            
-        Returns:
-            RememberResult with operation details
+        """Store facts for the demo customer.
+
+        In single-user mode, always uses the demo dataset.
         """
-        dataset = dataset_for(customer_id)
-        # Use the existing MemoryService adapter
+        dataset = self.current_dataset
         try:
-            result = self.memory_adapter.remember(customer_id, facts)
-            logger.info("Remembered %d facts for customer %s (isolated)", result.fact_count, customer_id)
+            result = self.memory_adapter.remember(customer_id, tuple(facts))
+            logger.info("Remembered %d facts for demo dataset", result.fact_count)
             return result
         except Exception as exc:
             raise MemoryAdapterError(
-                f"Memory remember failed for customer {customer_id}: {exc}",
+                f"Memory remember failed: {exc}",
                 integration="memory_service",
                 operation="remember",
                 customer_id=customer_id,
             ) from exc
-    
+
     def recall_with_customer(self, customer_id: str, query: str) -> RecallResult:
-        """Retrieve memories for a specific customer without changing the current customer.
-        
-        Args:
-            customer_id: The customer ID to recall memories for
-            query: The query string to search memories against
-            
-        Returns:
-            RecallResult with retrieved fragments
+        """Retrieve memories for the demo customer.
+
+        In single-user mode, always uses the demo dataset.
         """
-        dataset = dataset_for(customer_id)
-        # Use the existing MemoryService adapter
+        dataset = self.current_dataset
         try:
             result = self.memory_adapter.recall(customer_id, query)
-            logger.info("Recalled %d fragments for customer %s (isolated)", result.result_count, customer_id)
+            logger.info("Recalled %d fragments for demo dataset", result.result_count)
             return result
         except Exception as exc:
             raise MemoryAdapterError(
-                f"Memory recall failed for customer {customer_id}: {exc}",
+                f"Memory recall failed: {exc}",
                 integration="memory_service",
                 operation="recall",
                 customer_id=customer_id,
             ) from exc
-    
+
     def get_customer_isolation_report(self, customer_id: str) -> Dict[str, Any]:
-        """Get a report of memories for a customer to verify isolation.
-        
+        """Get a report of memories (single-user mode - all in one dataset).
+
         Args:
             customer_id: The customer ID to check
-            
+
         Returns:
             Dictionary with isolation information
         """
-        dataset = dataset_for(customer_id)
-        # Use the existing MemoryService adapter
+        dataset = self.current_dataset
         try:
-            result = adapter.recall(customer_id, "all memories")
-        # Use the existing MemoryService adapter
-            # Test recall with a different customer to verify isolation
-            # This is just a structural check - actual isolation is verified by dataset naming
+            result = self.memory_adapter.recall(customer_id, "all memories")
             return {
                 "customer_id": customer_id,
                 "dataset": dataset,
                 "fragment_count": result.result_count,
                 "fragments": result.fragments,
-                "isolation_verified": True,  # Dataset naming ensures isolation
+                "isolation_verified": True,  # Single dataset for demo
             }
         except Exception as exc:
             raise MemoryAdapterError(
-                f"Failed to get isolation report for customer {customer_id}: {exc}",
+                f"Failed to get isolation report: {exc}",
                 integration="memory_service",
                 operation="isolation_report",
                 customer_id=customer_id,
             ) from exc
+
     def close(self) -> None:
         """Close the memory adapter and release resources."""
-        if hasattr(self.memory_adapter, 'close'):
+        if hasattr(self.memory_adapter, "close"):
             self.memory_adapter.close()

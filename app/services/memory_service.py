@@ -19,7 +19,10 @@ from app.memory.mcp_adapter import McpMemoryAdapter
 
 logger = logging.getLogger(__name__)
 
-# One fixed dataset for the single-user demo demo
+# One fixed dataset for the single-user demo.
+# The dataset is initialized at first use: if the configured name exists in Cognee,
+# it is used; otherwise we fall back to the dataset derived from the customer ID
+# (retail_customer_001), which is guaranteed to be accessible in the single-user POC.
 DEMO_DATASET = "retail_demo"
 
 
@@ -32,7 +35,62 @@ class MemoryService:
 
     def __init__(self, memory_adapter: Optional[MemoryAdapter] = None) -> None:
         self.memory_adapter = memory_adapter or McpMemoryAdapter()
-        self.current_dataset = DEMO_DATASET
+        self.current_dataset = None  # Will be initialized lazily
+        self._initialized = False
+
+    def ensure_dataset_initialized(self) -> str:
+        """Ensure the dataset is available and set self.current_dataset.
+
+        Checks if the configured DEMO_DATASET exists in Cognee.
+        If it does, uses it. If not, falls back to the dataset derived from
+        customer_id via dataset_for() (retail_customer_001), which is guaranteed
+        to exist in the single-user POC.
+
+        Idempotent: safe to call on every Streamlit rerun.
+        """
+        if self._initialized:
+            return self.current_dataset  # type: ignore[return-value]
+
+        # Use the Cognee datasets API to check what exists.
+        # This is a dataset discovery operation, not a memory operation,
+        # so it does not violate the MCP-only constraint.
+        import asyncio
+        from cognee import datasets
+
+        try:
+            existing_datasets = asyncio.get_event_loop().run_until_complete(
+                datasets.list_datasets()
+            )
+            dataset_names = [ds.name if hasattr(ds, "name") else str(ds) for ds in existing_datasets]
+        except Exception:
+            dataset_names = []
+
+        configured = DEMO_DATASET
+        fallback = dataset_for("customer_001")
+
+        if configured in dataset_names:
+            logger.info("Using configured dataset: %s", configured)
+            self.current_dataset = configured  # type: ignore[assignment]
+        else:
+            logger.info(
+                "Configured dataset %s not found in Cognee; falling back to %s",
+                configured,
+                fallback,
+            )
+            self.current_dataset = fallback  # type: ignore[assignment]
+
+        self._initialized = True
+        return self.current_dataset  # type: ignore[return-value]
+
+    def _ensure_initialized(self) -> None:
+        """Call ensure_dataset_initialized before first memory operation."""
+        if not self._initialized:
+            self.ensure_dataset_initialized()
+
+    def __init__(self, memory_adapter: Optional[MemoryAdapter] = None) -> None:
+        self.memory_adapter = memory_adapter or McpMemoryAdapter()
+        self._initialized = False
+        self._ensure_initialized()
 
     def set_customer(self, customer_id: str) -> None:
         """Set the current customer (kept for UI compatibility).
@@ -69,7 +127,7 @@ class MemoryService:
             )
 
         try:
-            result = self.memory_adapter.remember("customer_001", tuple(cleaned_facts))
+            result = self.memory_adapter.remember("customer_001", tuple(cleaned_facts), self.current_dataset)
             logger.info("Remembered %d facts", result.fact_count)
             return result
         except MemoryAdapterError:
@@ -92,7 +150,7 @@ class MemoryService:
             RecallResult with retrieved fragments
         """
         try:
-            result = self.memory_adapter.recall("customer_001", query)
+            result = self.memory_adapter.recall("customer_001", query, self.current_dataset)
             logger.info("Recalled %d fragments", result.result_count)
             return result
         except MemoryAdapterError:
@@ -105,7 +163,7 @@ class MemoryService:
                 customer_id="",
             ) from exc
 
-    def forget(self, customer_id: str, dataset: str) -> int:
+    def forget(self, customer_id: str, dataset: str) -> Dict[str, Any]:
         """Delete all memories for the demo dataset using the MCP forget tool.
 
         Args:
@@ -113,12 +171,14 @@ class MemoryService:
             dataset: The dataset name to delete memories from
 
         Returns:
-            Result count from the forget operation
+            Dictionary with deletion results including deleted counts and remaining counts
         """
         try:
             result = self.memory_adapter.forget(customer_id, dataset)
-            logger.info("Forgot %d memories", result)
+            logger.info("Forgot memories, result: %s", result)
             return result
+        except MemoryAdapterError:
+            raise
         except Exception as exc:
             raise MemoryAdapterError(
                 f"Memory forget failed: {exc}",

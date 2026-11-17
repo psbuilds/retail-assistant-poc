@@ -255,3 +255,56 @@ EMBEDDING_DIMENSIONS=768
 All other concerns (tokenizer fallback, MCP architecture, test passing) are either already handled by Cognee's built-in logic or were addressed as part of the overall POC completion (MCP adapter simplification, conversation service fixes, startup/health scripts).
 
 The investigation confirmed that Cognee 1.6.6's embedding architecture is flexible and the tokenizer fallback mechanism works correctly for Ollama models with non-standard names. The 4 EMBEDDING_* vars are the minimal, correct fix.
+## Phase 8 — Clear All Memories Feature Implementation
+
+### Root Cause of Incomplete Deletion
+The original implementation had two problems:
+
+1. **`mcp_adapter.py` `forget()` returned only an integer count** — this count was extracted from the MCP tool's result text, but did not verify that ALL fragments/chunks were actually removed. The Cognee storage model may keep derived records (chunks, embeddings, graph nodes) even after top-level memory records are deleted.
+
+2. **`streamlit_app.py` reported success before verification** — the UI called `st.success(f"Deleted {result} memories from dataset: {dataset}")` immediately after the `forget` call, before performing the fresh recall verification. Then it showed a warning afterward, but the success message was already displayed and could not be easily removed.
+
+### Changes Made
+
+#### 1. `app/memory/mcp_adapter.py` — Structured deletion result
+- Changed `forget()` return type from `int` to `Dict[str, Any]`
+- The method now performs verification by calling `_recall()` after the `forget` tool
+- Returns structured dictionary with:
+  - `deleted_memories`: count from the tool result
+  - `deleted_fragments`: approximation based on tool result
+  - `remaining_memories`: verified count from fresh recall, or "unknown"
+  - `remaining_fragments`: verified count from fresh recall, or "unknown"
+  - `verification_passed`: `True` only when `remaining_fragments == 0`
+  - `error`: error message if the tool reported failure or verification failed
+
+#### 2. `app/services/memory_service.py` — Pass through structured result
+- Changed `forget()` return type from `int` to `Dict[str, Any]`
+- Now passes through the structured result from the MCP adapter
+
+#### 3. `app/ui/streamlit_app.py` — Trustworthy UI feedback
+- **Before**: `st.success(f"Deleted {result} memories from dataset: {dataset}")` immediately, then warning if fragments remain
+- **After**: 
+  - Only shows `st.success` when `verification_passed` is `True`
+  - Shows `st.error` when verification fails (fragments remain), with details:
+    - Target dataset
+    - Fragments remaining count
+    - Memories remaining count (if available)
+    - Deleted memories count (if > 0)
+  - Shows `st.error` when the tool reports an error
+  - Shows `st.warning` when the state is unclear
+  - Displays "Memories remaining: 0 / Fragments remaining: 0" on success
+  - Provides a clear retry path since the operation is idempotent
+
+### Verification Flow (New)
+1. User clicks "Confirm Delete All Memories"
+2. UI calls `service.memory_service.forget(customer_id, dataset)`
+3. Adapter calls MCP `forget` tool, then performs fresh `_recall()` to verify
+4. Result is a structured dict with `verification_passed` flag
+5. UI displays appropriate message based on `verification_passed`:
+   - ✅ **Success**: `verification_passed == True` → "All persistent memories were successfully deleted..."
+   - ❌ **Incomplete**: `verification_passed == False` → "Memory deletion was incomplete. Some persistent records may still remain..." with details
+   - ⚠️ **Error**: result contains `error` key → "Memory deletion failed: {error}"
+   - ❓ **Unknown**: neither of the above → "Memory deletion completed but verification status is unclear..."
+
+### Dataset Isolation
+The deletion is scoped to the configured demo dataset (`retail_demo` by default). The `forget` tool uses `customer_id` and `dataset_name` parameters to ensure only the target dataset is affected. Other datasets remain untouched.

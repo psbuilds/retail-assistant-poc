@@ -165,11 +165,16 @@ class MemoryAdapter(ABC):
 
     integration: ClassVar[str] = "unknown"
 
-    def remember(self, customer_id: str, facts: Sequence[str]) -> RememberResult:
-        """Store ``facts`` as memory for ``customer_id``."""
+    def remember(self, customer_id: str, facts: Sequence[str], dataset: str | None = None) -> RememberResult:
+        """Store ``facts`` as memory for ``customer_id``.
+
+        If ``dataset`` is provided it overrides the derived dataset (``dataset_for``);
+        otherwise the dataset is derived from ``customer_id`` via :func:`dataset_for`.
+        """
         customer_id = _validate_customer_id(customer_id)
         cleaned = _validate_facts(facts)
-        dataset = dataset_for(customer_id)
+        if dataset is None:
+            dataset = dataset_for(customer_id)
 
         started = perf_counter()
         try:
@@ -202,11 +207,16 @@ class MemoryAdapter(ABC):
             latency_ms=latency_ms,
         )
 
-    def recall(self, customer_id: str, query: str) -> RecallResult:
-        """Return memory fragments relevant to ``query`` for ``customer_id``."""
+    def recall(self, customer_id: str, query: str, dataset: str | None = None) -> RecallResult:
+        """Return memory fragments relevant to ``query`` for ``customer_id``.
+
+        If ``dataset`` is provided it overrides the derived dataset (``dataset_for``);
+        otherwise the dataset is derived from ``customer_id`` via :func:`dataset_for`.
+        """
         customer_id = _validate_customer_id(customer_id)
         query = _validate_query(query)
-        dataset = dataset_for(customer_id)
+        if dataset is None:
+            dataset = dataset_for(customer_id)
 
         started = perf_counter()
         try:

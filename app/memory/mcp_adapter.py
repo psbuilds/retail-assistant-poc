@@ -9,7 +9,7 @@ import os
 import re
 import threading
 from concurrent.futures import Future
-from typing import Any
+from typing import Any, Dict
 
 from mcp import ClientSession, types
 from mcp.client.streamable_http import streamable_http_client
@@ -242,7 +242,7 @@ class McpMemoryAdapter(MemoryAdapter):
         )
         return result
 
-    def forget(self, customer_id: str, dataset: str) -> int:
+    def forget(self, customer_id: str, dataset: str) -> Dict[str, Any]:
         """Delete all memories for a customer dataset using the MCP forget tool.
 
         Args:
@@ -250,7 +250,7 @@ class McpMemoryAdapter(MemoryAdapter):
             dataset: The dataset name to delete memories from
 
         Returns:
-            Result count from the forget operation
+            Dictionary with deletion results including deleted counts and remaining counts
         """
         try:
             result = self._call(
@@ -261,17 +261,60 @@ class McpMemoryAdapter(MemoryAdapter):
                 },
                 customer_id,
             )
-            # _call returns the raw result; extract count from text if possible
+            # _call returns the raw result; extract information from text
             text = _text_from_result(result).strip()
-            # Try to extract a number from the result text
+
+            # Try to extract a number from the result text (deleted count)
             import re
             match = re.search(r"(\d+)", text)
-            if match:
-                return int(match.group(1))
-            # If no number, return 1 if we got a success signal
-            if "success" in text.lower() or "deleted" in text.lower():
-                return 1
-            return 0
+            deleted_count = int(match.group(1)) if match else 0
+
+            # Check for failure signals in the result text
+            has_error = getattr(result, "isError", False)
+            first_line = text.splitlines()[0].strip() if text else ""
+            error_prefix = "Error:"
+            if first_line.startswith(error_prefix) or has_error:
+                # Tool reported an error; cannot verify deletion
+                return {
+                    "deleted_memories": 0,
+                    "deleted_fragments": 0,
+                    "remaining_memories": "unknown",
+                    "remaining_fragments": "unknown",
+                    "verification_passed": False,
+                    "error": text,
+                }
+
+            # Perform a fresh recall to verify deletion completeness
+            try:
+                fresh_recall = self._recall(customer_id, f"all memories from {dataset}", dataset)
+                remaining_fragments = len(fresh_recall.fragments)
+                remaining_memories = remaining_fragments  # approximate
+            except Exception as verify_error:
+                remaining_memories = "unknown"
+                remaining_fragments = "unknown"
+                verification_passed = False
+                return {
+                    "deleted_memories": deleted_count,
+                    "deleted_fragments": 0,
+                    "remaining_memories": remaining_memories,
+                    "remaining_fragments": remaining_fragments,
+                    "verification_passed": False,
+                    "error": str(verify_error),
+                }
+
+            # Determine if deletion is complete
+            verification_passed = remaining_fragments == 0
+
+            return {
+                "deleted_memories": deleted_count,
+                "deleted_fragments": deleted_count,  # approximation based on tool result
+                "remaining_memories": remaining_memories,
+                "remaining_fragments": remaining_fragments,
+                "verification_passed": verification_passed,
+                "error": None,
+            }
+        except MemoryAdapterError:
+            raise
         except Exception as exc:
             raise MemoryAdapterError(
                 f"MCP forget failed: {exc}",

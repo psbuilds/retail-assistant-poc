@@ -207,19 +207,51 @@ def main() -> None:
                     customer_id = service.memory_service.get_customer()
                     dataset = service.memory_service.get_dataset()
                     result = service.memory_service.forget(customer_id, dataset)
-                    st.success(f"Deleted {result} memories from dataset: {dataset}")
 
-                    # Verify deletion by attempting a fresh recall
-                    fresh_recall = service.memory_service.recall("all")
-                    if fresh_recall.fragments:
-                        st.warning(
-                            f"Warning: {len(fresh_recall.fragments)} fragments still remain. "
-                            "Deletion may not have been complete."
-                        )
-                    else:
+                    # Handle structured result from forget operation
+                    if result.get("verification_passed", False):
+                        # Deletion verified complete
                         st.success(
-                            "Verification complete: No memories remain for this dataset."
+                            f"All persistent memories were successfully deleted from dataset: {dataset}."
                         )
+                        st.info(
+                            f"Memories remaining: 0\nFragments remaining: 0"
+                        )
+                    elif result.get("error"):
+                        # Operation failed with an error
+                        st.error(
+                            f"Memory deletion failed: {result['error']}"
+                        )
+                    elif not result.get("verification_passed", False):
+                        # Verification failed - some records remain
+                        remaining_fragments = result.get("remaining_fragments", "unknown")
+                        remaining_memories = result.get("remaining_memories", "unknown")
+                        deleted_memories = result.get("deleted_memories", 0)
+                        st.error(
+                            f"Memory deletion was incomplete. Some persistent records may still remain."
+                        )
+                        st.caption(
+                            f"Target dataset: {dataset}"
+                        )
+                        if isinstance(remaining_fragments, int):
+                            st.caption(
+                                f"Fragments remaining: {remaining_fragments}"
+                            )
+                        if isinstance(remaining_memories, int):
+                            st.caption(
+                                f"Memories remaining: {remaining_memories}"
+                            )
+                        if deleted_memories > 0:
+                            st.caption(
+                                f"Deleted memories: {deleted_memories}"
+                            )
+                    else:
+                        # Unknown state
+                        st.warning(
+                            f"Memory deletion completed but verification status is unclear. "
+                            f"Dataset: {dataset}"
+                        )
+
                 except Exception as e:
                     st.error(f"Failed to delete memories: {e}")
 
@@ -237,14 +269,16 @@ def main() -> None:
         # Clear conversation - only clears conversation, not memories
         if st.button("🗑️ Clear conversation", help="Chat history only - memories preserved"):
             service.clear_conversation()
-            # We cannot easily clear session_state.messages here without rerun,
-            # so just log and let the normal flow handle it
+            st.session_state.conversation_history = []
             st.success("Conversation cleared. Memories preserved.")
             st.rerun()
 
         st.caption("Clearing the chat never deletes long-term memories.")
 
     # Conversation transcript
+    # Use session_state-stored history if available, otherwise service history
+    if "conversation_history" in st.session_state and st.session_state.conversation_history:
+        service.conversation_history = st.session_state.conversation_history
     if not service.conversation_history:
         st.info("Ask for something to get started, for example 'I want headphones under ₹2000'.")
 
@@ -271,6 +305,8 @@ def main() -> None:
     prompt = st.chat_input("Type your shopping request...")
     if prompt:
         service.process_query(prompt)
+        # Persist conversation history in session_state
+        st.session_state.conversation_history = service.conversation_history
         st.rerun()
 
 
